@@ -35,11 +35,35 @@ const char* AP_PASSWORD = "12345678";   // min 8 chars
 const int IR_PINS[8] = {36, 39, 34, 35, 32, 33, 25, 26};
 const int WEIGHTS[8] = {-3500, -2500, -1500, -500, 500, 1500, 2500, 3500};
 
-// ── LEDC PWM ────────────────────────────────────────────────
+// ── LEDC PWM Compatibility (ESP32 Core v2.x & v3.x) ─────────
+#if __has_include(<esp_arduino_version.h>)
+  #include <esp_arduino_version.h>
+#endif
+
 #define CH_PWMA  0
 #define CH_PWMB  1
 const int PWM_FREQ = 5000;
 const int PWM_RES  = 8;
+
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  // ESP32 Arduino Core 3.0+ API
+  #define PWM_INIT() do { \
+      ledcAttach(PWMA, PWM_FREQ, PWM_RES); \
+      ledcAttach(PWMB, PWM_FREQ, PWM_RES); \
+  } while(0)
+  #define PWM_WRITE_A(val) ledcWrite(PWMA, val)
+  #define PWM_WRITE_B(val) ledcWrite(PWMB, val)
+#else
+  // ESP32 Arduino Core 2.x legacy API
+  #define PWM_INIT() do { \
+      ledcSetup(CH_PWMA, PWM_FREQ, PWM_RES); \
+      ledcAttachPin(PWMA, CH_PWMA); \
+      ledcSetup(CH_PWMB, PWM_FREQ, PWM_RES); \
+      ledcAttachPin(PWMB, CH_PWMB); \
+  } while(0)
+  #define PWM_WRITE_A(val) ledcWrite(CH_PWMA, val)
+  #define PWM_WRITE_B(val) ledcWrite(CH_PWMB, val)
+#endif
 
 // ── PID & Speed (defaults, overwritten by saved prefs) ──────
 float Kp = 0.05;
@@ -526,7 +550,7 @@ void motorA(int speed) {
         digitalWrite(AIN2, HIGH);
         speed = -speed;
     }
-    ledcWrite(CH_PWMA, constrain(speed, 0, 255));
+    PWM_WRITE_A(constrain(speed, 0, 255));
 }
 
 void motorB(int speed) {
@@ -538,12 +562,12 @@ void motorB(int speed) {
         digitalWrite(BIN2, HIGH);
         speed = -speed;
     }
-    ledcWrite(CH_PWMB, constrain(speed, 0, 255));
+    PWM_WRITE_B(constrain(speed, 0, 255));
 }
 
 void stopMotors() {
-    ledcWrite(CH_PWMA, 0);
-    ledcWrite(CH_PWMB, 0);
+    PWM_WRITE_A(0);
+    PWM_WRITE_B(0);
 }
 
 // =============================================================
@@ -860,10 +884,7 @@ void setup() {
     pinMode(BIN1, OUTPUT); pinMode(BIN2, OUTPUT);
     pinMode(STBY, OUTPUT); digitalWrite(STBY, HIGH);
 
-    ledcAttachPin(PWMA, CH_PWMA);
-    ledcSetup(CH_PWMA, PWM_FREQ, PWM_RES);
-    ledcAttachPin(PWMB, CH_PWMB);
-    ledcSetup(CH_PWMB, PWM_FREQ, PWM_RES);
+    PWM_INIT();
 
     // IR sensor pins
     for (int i = 0; i < 8; i++) {
