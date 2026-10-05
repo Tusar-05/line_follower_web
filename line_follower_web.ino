@@ -36,9 +36,14 @@ const char* AP_PASSWORD  = "12345678";   // min 8 chars
 #define PWMB  22
 #define STBY  23
 
-// ── IR Sensor Pins (ADC1) ───────────────────────────────────
+// ── IR Sensor Pins (ESP32 DevKit V1) ────────────────────────
 const int IR_PINS[8] = {36, 39, 34, 35, 32, 33, 25, 26};
 const int WEIGHTS[8] = {-3500, -2500, -1500, -500, 500, 1500, 2500, 3500};
+
+// Set to true if your 8-IR module has digital outputs (D1-D8)
+// Set to false if your module has analog outputs (A1-A8)
+const bool SENSORS_ARE_DIGITAL = false;
+const bool SENSOR_ACTIVE_LOW   = true;  // Most digital IR modules output LOW on black line
 
 // ── LEDC PWM Compatibility (ESP32 Core v2.x & v3.x) ─────────
 #if __has_include(<esp_arduino_version.h>)
@@ -314,6 +319,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       <button class="btn calibrate" id="btnCal" onclick="sendCmd('calibrate')">&#x1F504; Calibrate</button>
       <button class="btn test" id="btnTest" onclick="sendCmd('pid_test')">&#x1F9EA; PID Test</button>
     </div>
+    <div class="btn-group" style="margin-top:8px">
+      <button class="btn" style="background:#6366f1;color:#fff" onclick="sendCmd('test_motors')">&#x26A1; Test Motors</button>
+    </div>
   </div>
 
   <!-- Live Stats -->
@@ -508,26 +516,41 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   }
 
   function sendPID() {
-    if (!ws || ws.readyState !== 1) return;
-    ws.send(JSON.stringify({
-      cmd: 'set_pid',
-      kp: parseFloat(document.getElementById('kpSlider').value),
-      ki: parseFloat(document.getElementById('kiSlider').value),
-      kd: parseFloat(document.getElementById('kdSlider').value),
-      baseSpeed: parseInt(document.getElementById('speedSlider').value)
-    }));
+    var kp = parseFloat(document.getElementById('kpSlider').value);
+    var ki = parseFloat(document.getElementById('kiSlider').value);
+    var kd = parseFloat(document.getElementById('kdSlider').value);
+    var speed = parseInt(document.getElementById('speedSlider').value);
+
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({
+        cmd: 'set_pid',
+        kp: kp,
+        ki: ki,
+        kd: kd,
+        baseSpeed: speed
+      }));
+    }
+    fetch('/set_pid?kp=' + kp + '&ki=' + ki + '&kd=' + kd + '&speed=' + speed).catch(function(){});
   }
 
   function savePID() {
-    if (!ws || ws.readyState !== 1) return;
-    ws.send(JSON.stringify({ cmd: 'save_pid' }));
     addLog('Saving PID to flash...');
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ cmd: 'save_pid' }));
+    }
+    fetch('/cmd?action=save_pid')
+      .then(function() { addLog('PID saved to flash'); })
+      .catch(function(){});
   }
 
   function sendCmd(c) {
-    if (!ws || ws.readyState !== 1) return;
-    ws.send(JSON.stringify({ cmd: c }));
-    addLog('Sent: ' + c);
+    addLog('Cmd: ' + c);
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ cmd: c }));
+    }
+    fetch('/cmd?action=' + encodeURIComponent(c))
+      .then(function() { addLog('Cmd ' + c + ' delivered'); })
+      .catch(function(e) { addLog('Cmd delivery error: ' + e); });
   }
 
   function addLog(msg) {
@@ -536,6 +559,23 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     el.innerHTML += t + '  ' + msg + '\n';
     el.scrollTop = el.scrollHeight;
   }
+
+  // Automatic HTTP fallback polling if WebSocket is not connected
+  setInterval(function() {
+    if (!ws || ws.readyState !== 1) {
+      fetch('/telemetry')
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+          handleMessage(d);
+          document.getElementById('statusDot').className = 'status-dot connected';
+          document.getElementById('statusText').textContent = 'Connected (HTTP)';
+        })
+        .catch(function() {
+          document.getElementById('statusDot').className = 'status-dot';
+          document.getElementById('statusText').textContent = 'Connecting...';
+        });
+    }
+  }, 200);
 
   connectWS();
 </script>
@@ -573,6 +613,10 @@ void motorB(int speed) {
 void stopMotors() {
     PWM_WRITE_A(0);
     PWM_WRITE_B(0);
+    digitalWrite(AIN1, LOW);
+    digitalWrite(AIN2, LOW);
+    digitalWrite(BIN1, LOW);
+    digitalWrite(BIN2, LOW);
 }
 
 // =============================================================
@@ -628,13 +672,19 @@ float readPosition() {
     long totalValue  = 0;
 
     for (int i = 0; i < 8; i++) {
-        int raw = analogRead(IR_PINS[i]);
-        int range = sensorMax[i] - sensorMin[i];
-        if (range == 0) {
-            sensorNormalized[i] = 0;
+        if (SENSORS_ARE_DIGITAL) {
+            bool onLine = digitalRead(IR_PINS[i]);
+            if (SENSOR_ACTIVE_LOW) onLine = !onLine;
+            sensorNormalized[i] = onLine ? 1000 : 0;
         } else {
-            sensorNormalized[i] = (long)(raw - sensorMin[i]) * 1000 / range;
-            sensorNormalized[i] = constrain(sensorNormalized[i], 0, 1000);
+            int raw = analogRead(IR_PINS[i]);
+            int range = sensorMax[i] - sensorMin[i];
+            if (range == 0) {
+                sensorNormalized[i] = 0;
+            } else {
+                sensorNormalized[i] = (long)(raw - sensorMin[i]) * 1000 / range;
+                sensorNormalized[i] = constrain(sensorNormalized[i], 0, 1000);
+            }
         }
         weightedSum += (long)sensorNormalized[i] * WEIGHTS[i];
         totalValue  += sensorNormalized[i];
@@ -751,55 +801,65 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
             if (err) return;
 
             const char* cmd = doc["cmd"];
-
-            if (strcmp(cmd, "start") == 0) {
-                if (isCalibrated) {
-                    robotState = RUNNING;
-                    integral = 0;
-                    lastError = 0;
-                    sendLog("Robot STARTED");
-                } else {
-                    sendLog("ERROR: Calibrate first!");
-                }
-            }
-            else if (strcmp(cmd, "stop") == 0) {
-                robotState = STOPPED;
-                stopMotors();
-                sendLog("Robot STOPPED");
-            }
-            else if (strcmp(cmd, "calibrate") == 0) {
-                sendLog("Calibration started...");
-                startCalibration();
-                sendLog("Calibration complete!");
-            }
-            else if (strcmp(cmd, "pid_test") == 0) {
-                if (isCalibrated) {
-                    robotState = PID_TEST;
-                    integral = 0;
-                    lastError = 0;
-                    sendLog("PID TEST mode — push robot off line to test response");
-                } else {
-                    sendLog("ERROR: Calibrate first!");
-                }
-            }
-            else if (strcmp(cmd, "set_pid") == 0) {
+            if (strcmp(cmd, "set_pid") == 0) {
                 Kp = doc["kp"] | Kp;
                 Ki = doc["ki"] | Ki;
                 Kd = doc["kd"] | Kd;
                 baseSpeed = doc["baseSpeed"] | baseSpeed;
-            }
-            else if (strcmp(cmd, "save_pid") == 0) {
-                preferences.begin("lf", false);
-                preferences.putFloat("kp", Kp);
-                preferences.putFloat("ki", Ki);
-                preferences.putFloat("kd", Kd);
-                preferences.putInt("speed", baseSpeed);
-                preferences.end();
-                sendLog("PID saved to flash!");
+            } else {
+                handleCommand(cmd);
             }
             break;
         }
         default: break;
+    }
+}
+
+void handleCommand(const char* cmd) {
+    if (strcmp(cmd, "start") == 0) {
+        robotState = RUNNING;
+        integral = 0;
+        lastError = 0;
+        sendLog("Robot STARTED");
+    }
+    else if (strcmp(cmd, "stop") == 0) {
+        robotState = STOPPED;
+        stopMotors();
+        sendLog("Robot STOPPED");
+    }
+    else if (strcmp(cmd, "calibrate") == 0) {
+        sendLog("Calibration started...");
+        startCalibration();
+        sendLog("Calibration complete!");
+    }
+    else if (strcmp(cmd, "pid_test") == 0) {
+        robotState = PID_TEST;
+        integral = 0;
+        lastError = 0;
+        sendLog("PID TEST mode — push robot off line to test response");
+    }
+    else if (strcmp(cmd, "save_pid") == 0) {
+        preferences.begin("lf", false);
+        preferences.putFloat("kp", Kp);
+        preferences.putFloat("ki", Ki);
+        preferences.putFloat("kd", Kd);
+        preferences.putInt("speed", baseSpeed);
+        preferences.end();
+        sendLog("PID saved to flash!");
+    }
+    else if (strcmp(cmd, "test_motors") == 0) {
+        sendLog("Testing Left Motor...");
+        motorA(200);
+        delay(700);
+        motorA(0);
+        delay(250);
+
+        sendLog("Testing Right Motor...");
+        motorB(200);
+        delay(700);
+        motorB(0);
+        stopMotors();
+        sendLog("Motor test complete!");
     }
 }
 
@@ -816,15 +876,7 @@ void sendLog(const char* msg) {
 // =============================================================
 //  Send Telemetry to Dashboard
 // =============================================================
-void sendTelemetry() {
-    if (millis() - lastWsSend < WS_SEND_INTERVAL) return;
-    lastWsSend = millis();
-
-    // Read sensors when idle/stopped (for dashboard visualization)
-    if (robotState != RUNNING && robotState != PID_TEST) {
-        readPosition();
-    }
-
+String getTelemetryJson() {
     StaticJsonDocument<512> doc;
     doc["type"] = "telemetry";
 
@@ -848,13 +900,31 @@ void sendTelemetry() {
 
     String json;
     serializeJson(doc, json);
-    webSocket.broadcastTXT(json);
+    return json;
+}
+
+void sendTelemetry() {
+    if (millis() - lastWsSend < WS_SEND_INTERVAL) return;
+    lastWsSend = millis();
+
+    // Read sensors when idle/stopped (for dashboard visualization)
+    if (robotState != RUNNING && robotState != PID_TEST) {
+        readPosition();
+    }
+
+    webSocket.broadcastTXT(getTelemetryJson());
 }
 
 // =============================================================
 //  Load Saved Settings
 // =============================================================
 void loadSettings() {
+    // Default calibration values so the robot works out of the box
+    for (int i = 0; i < 8; i++) {
+        sensorMin[i] = 0;
+        sensorMax[i] = 4095;
+    }
+
     preferences.begin("lf", true);  // read-only
     Kp = preferences.getFloat("kp", 0.05);
     Ki = preferences.getFloat("ki", 0.0001);
@@ -871,6 +941,8 @@ void loadSettings() {
             sensorMax[i] = preferences.getInt(key, 4095);
         }
         Serial.println("Loaded saved calibration data");
+    } else {
+        Serial.println("Using default sensor range (0-4095)");
     }
     preferences.end();
 
@@ -887,13 +959,29 @@ void setup() {
     // Motor pins
     pinMode(AIN1, OUTPUT); pinMode(AIN2, OUTPUT);
     pinMode(BIN1, OUTPUT); pinMode(BIN2, OUTPUT);
+    pinMode(PWMA, OUTPUT); pinMode(PWMB, OUTPUT);
     pinMode(STBY, OUTPUT); digitalWrite(STBY, HIGH);
 
     PWM_INIT();
 
+    // ── Quick Hardware Motor Self-Test on Boot ──────────────────
+    // Spins Left motor for 300ms, then Right motor for 300ms
+    Serial.println("\n[Motor Test] Testing Left Motor...");
+    motorA(200);
+    delay(300);
+    motorA(0);
+    delay(150);
+
+    Serial.println("[Motor Test] Testing Right Motor...");
+    motorB(200);
+    delay(300);
+    motorB(0);
+    stopMotors();
+    Serial.println("[Motor Test] Motor self-test complete.\n");
+
     // IR sensor pins
     for (int i = 0; i < 8; i++) {
-        pinMode(IR_PINS[i], INPUT);
+        pinMode(IR_PINS[i], SENSORS_ARE_DIGITAL ? INPUT_PULLUP : INPUT);
     }
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
@@ -937,10 +1025,36 @@ void setup() {
         Serial.println("[mDNS] Responder started: http://linefollower.local");
     }
 
-    // HTTP server — serve dashboard
+    // HTTP server routes (Port 80)
     server.on("/", HTTP_GET, []() {
         server.send(200, "text/html", INDEX_HTML);
     });
+
+    server.on("/telemetry", HTTP_GET, []() {
+        if (robotState != RUNNING && robotState != PID_TEST) {
+            readPosition();
+        }
+        server.send(200, "application/json", getTelemetryJson());
+    });
+
+    server.on("/cmd", HTTP_GET, []() {
+        if (server.hasArg("action")) {
+            String act = server.arg("action");
+            handleCommand(act.c_str());
+            server.send(200, "text/plain", "OK");
+        } else {
+            server.send(400, "text/plain", "Missing action");
+        }
+    });
+
+    server.on("/set_pid", HTTP_GET, []() {
+        if (server.hasArg("kp")) Kp = server.arg("kp").toFloat();
+        if (server.hasArg("ki")) Ki = server.arg("ki").toFloat();
+        if (server.hasArg("kd")) Kd = server.arg("kd").toFloat();
+        if (server.hasArg("speed")) baseSpeed = server.arg("speed").toInt();
+        server.send(200, "text/plain", "OK");
+    });
+
     server.begin();
     Serial.println("[HTTP] Server started on port 80");
 
