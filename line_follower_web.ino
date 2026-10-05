@@ -13,14 +13,19 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
 
-// ── WiFi Access Point Config ────────────────────────────────
-const char* AP_SSID     = "LineFollower";
-const char* AP_PASSWORD = "12345678";   // min 8 chars
+// ── Mobile Hotspot Credentials ──────────────────────────────
+const char* STA_SSID     = "POCO";
+const char* STA_PASSWORD = "niggaswifi";
+
+// ── Backup Access Point (Direct connection if hotspot is off) ─
+const char* AP_SSID      = "LineFollower";
+const char* AP_PASSWORD  = "12345678";   // min 8 chars
 
 // ── Motor Driver Pins ───────────────────────────────────────
 #define AIN1  16
@@ -896,25 +901,55 @@ void setup() {
     // Load saved PID & calibration
     loadSettings();
 
-    // Start WiFi AP
+    // Configure WiFi in Dual Mode (Connects to POCO hotspot AND broadcasts AP)
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.setAutoReconnect(true);
+
+    // 1. Start backup AP so you can always connect directly if needed
     WiFi.softAP(AP_SSID, AP_PASSWORD);
-    Serial.print("AP IP: ");
-    Serial.println(WiFi.softAPIP());   // usually 192.168.4.1
+    Serial.println("\n[WiFi] Broadcasted AP: " + String(AP_SSID));
+    Serial.print("[WiFi] Direct AP IP: http://");
+    Serial.println(WiFi.softAPIP());
+
+    // 2. Connect to POCO hotspot
+    Serial.printf("[WiFi] Connecting to hotspot '%s'...", STA_SSID);
+    WiFi.begin(STA_SSID, STA_PASSWORD);
+
+    // Wait up to 8 seconds for hotspot connection
+    unsigned long startAttempt = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 8000) {
+        delay(500);
+        Serial.print(".");
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\n[WiFi] CONNECTED to POCO Hotspot!");
+        Serial.print("[WiFi] Dashboard URL: http://");
+        Serial.println(WiFi.localIP());
+    } else {
+        Serial.println("\n[WiFi] Hotspot not found or timed out.");
+        Serial.println("[WiFi] Ensure POCO hotspot AP Band is set to 2.4 GHz!");
+        Serial.println("[WiFi] You can still connect directly to 'LineFollower' WiFi at http://192.168.4.1");
+    }
+
+    // 3. Start mDNS so you can visit http://linefollower.local
+    if (MDNS.begin("linefollower")) {
+        Serial.println("[mDNS] Responder started: http://linefollower.local");
+    }
 
     // HTTP server — serve dashboard
     server.on("/", HTTP_GET, []() {
         server.send(200, "text/html", INDEX_HTML);
     });
     server.begin();
-    Serial.println("HTTP server started on port 80");
+    Serial.println("[HTTP] Server started on port 80");
 
     // WebSocket server
     webSocket.begin();
     webSocket.onEvent(webSocketEvent);
-    Serial.println("WebSocket server started on port 81");
+    Serial.println("[WS] Server started on port 81");
 
     loopCountTime = millis();
-    Serial.println("Ready! Connect to WiFi '" + String(AP_SSID) + "' and open http://192.168.4.1");
 }
 
 // =============================================================
