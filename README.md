@@ -104,12 +104,22 @@ The firmware hosts a **WiFi Access Point** and serves a real-time web dashboard 
 
 ### 4.2 How to Connect
 
-1. **Power on** the robot
-2. On your phone/laptop, connect to WiFi network:
-   - **SSID:** `LineFollower`
-   - **Password:** `12345678`
-3. Open a browser and go to **`http://192.168.4.1`**
-4. The dashboard loads instantly — no internet required
+The robot now operates in **Dual WiFi Mode**:
+
+#### Method A: Via your phone's Hotspot (POCO) — Recommended
+1. Turn on your phone's Portable Hotspot:
+   - **Name (SSID):** `POCO`
+   - **Password:** `niggaswifi`
+   - **IMPORTANT:** In Hotspot settings, ensure **AP Band** is set to **2.4 GHz** (ESP32 does not support 5 GHz).
+2. Turn on the ESP32 robot.
+3. Open your browser on the phone and visit:
+   - **`http://linefollower.local`** (or the IP shown in Serial Monitor / Hotspot connected devices list).
+
+#### Method B: Direct Connection (Backup)
+If hotspot is off or out of range, connect your phone directly to the ESP32:
+- **SSID:** `LineFollower`
+- **Password:** `12345678`
+- **URL:** **`http://192.168.4.1`**
 
 ### 4.3 Required Arduino Libraries
 

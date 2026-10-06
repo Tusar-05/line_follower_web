@@ -912,7 +912,8 @@ void sendTelemetry() {
         readPosition();
     }
 
-    webSocket.broadcastTXT(getTelemetryJson());
+    String json = getTelemetryJson();
+    webSocket.broadcastTXT(json);
 }
 
 // =============================================================
